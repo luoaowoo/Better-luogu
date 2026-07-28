@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "洛谷 AI 诊断助手",
+  "description": "在洛谷提交记录页按需生成诊断、满分复盘、同类题练习建议和个人错因记录。",
+  "version": "0.1.0",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["https://www.luogu.com.cn/*", "https://luogu.com.cn/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.luogu.com.cn/*", "https://luogu.com.cn/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "洛谷 AI 诊断助手",
+    "default_popup": "options.html"
+  }
+}

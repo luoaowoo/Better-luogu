@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>洛谷 AI 诊断助手设置</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="loe-options-page">
+  <main class="loe-options">
+    <h1>洛谷 AI 诊断助手</h1>
+    <nav class="loe-tabs" aria-label="插件页面">
+      <button class="loe-tab is-active" type="button" data-tab="settings">设置</button>
+      <button class="loe-tab" type="button" data-tab="analysis">错误分析</button>
+    </nav>
+
+    <section class="loe-tab-page" data-page="settings">
+      <label>
+        <span>API Base URL</span>
+        <input id="baseURL" type="url" placeholder="https://api.openai.com/v1">
+      </label>
+      <label>
+        <span>API Key</span>
+        <input id="apiKey" type="password" placeholder="sk-...">
+      </label>
+      <label>
+        <span>Model</span>
+        <input id="model" type="text" placeholder="gpt-4o-mini">
+      </label>
+      <label class="loe-check">
+        <input id="manualOnly" type="checkbox">
+        <span>只在点击后分析</span>
+      </label>
+      <button id="save" type="button">保存</button>
+      <p id="status"></p>
+    </section>
+
+    <section class="loe-tab-page" data-page="analysis" hidden>
+      <div id="analysisStatus" class="loe-popup-status">切换到本页后会读取当前标签页。</div>
+      <div class="loe-actions loe-popup-actions">
+        <button type="button" data-action="diagnose">AI 诊断</button>
+        <button type="button" data-action="review">复盘分析</button>
+        <button type="button" data-action="recommend">同类练习</button>
+      </div>
+      <div id="analysisOutput" class="loe-output loe-popup-output"></div>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>
