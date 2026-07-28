@@ -90,10 +90,11 @@ async function handleStreamMessage(port, message) {
     if (ACTIVE_STREAMS.has(key)) throw new Error("同一提交的相同分析正在进行中，请等待当前输出完成");
     ACTIVE_STREAMS.add(key);
     const context = await collectContext(message.recordId);
-    const messages = message.action === "review" ? buildReviewMessages(context) : buildDiagnosisMessages(context);
+    const isReview = message.action === "review";
+    const messages = isReview ? buildReviewMessages(context) : buildDiagnosisMessages(context);
     const streamed = await askAIStream(messages, (text) => {
       port.postMessage({ type: "chunk", text });
-    });
+    }, { maxTokens: isReview ? 900 : 1500 });
     const result = message.action === "review"
       ? normalizeReview(streamed.result, context)
       : normalizeDiagnosis(streamed.result, context);
@@ -479,14 +480,14 @@ async function askAI(messages) {
   return parseJsonObject(content);
 }
 
-async function askAIStream(messages, onChunk) {
+async function askAIStream(messages, onChunk, options = {}) {
   const settings = await getSettings();
   if (!settings.apiKey) throw new Error("请先在扩展选项页配置 API Key");
   const url = `${normalizeBaseURL(settings.baseURL)}/chat/completions`;
   const payload = {
     model: settings.model,
     temperature: 0.1,
-    max_tokens: 1500,
+    max_tokens: options.maxTokens || 1500,
     stream: true,
     stream_options: { include_usage: true },
     messages
@@ -533,7 +534,7 @@ async function askAIStream(messages, onChunk) {
   let usage = null;
 
   while (true) {
-    const { value, done } = await reader.read();
+    const { value, done } = await readStreamChunk(reader, options.idleMs || 45000);
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
@@ -560,6 +561,16 @@ async function askAIStream(messages, onChunk) {
 
   if (!content) throw new Error("AI 没有返回内容");
   return { result: parseJsonObject(content), usage: normalizeUsage(usage, messages, content) };
+}
+
+function readStreamChunk(reader, idleMs) {
+  let timeout;
+  return Promise.race([
+    reader.read(),
+    new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("AI 流式输出超过 45 秒没有新内容，已停止。本次材料可能太长，建议换更快模型或重试。")), idleMs);
+    })
+  ]).finally(() => clearTimeout(timeout));
 }
 
 async function readJsonResponse(response, label) {
@@ -659,16 +670,16 @@ function buildReviewMessages(context) {
       role: "user",
       content: [
         "任务：基于题解摘要和 AC 代码做满分复盘。题解优先；题解没有依据时 best_solution 必须为 null。",
-        "输出适中：your_solution_class 不超过 60 字；每个算法说明不超过 220 字，必须包含关键状态/转移或核心思路。",
+        "输出要短：your_solution_class 不超过 40 字；每个算法说明不超过 120 字，替代算法最多 2 个。",
         "confidence 表示输入材料对复盘结论的证据充分度，不是答案正确率；题解依据越直接分数越高。",
         "题解材料是多篇短摘录，只能提炼摘录中明确出现的算法关键词和思路，不要补全摘录外的证明。",
         "不要把“题解摘要被截断/材料不完整”当作输出内容；如果题解不足，就基于题面和 AC 代码给出能确认的算法分类。",
         "confidence 至少按这些证据给分：题面+AC代码能确认算法时不低于 45；题解也支持时不低于 70；只有题解明确冲突或完全缺失才低分。",
         "每个 best_solution 和 alternative_algorithms 都必须填写 complexity。题解没写复杂度时，你必须根据代码循环、状态数量、图规模或题面数据范围自行推导。",
-        "重点说明算法思想、复杂度、正确性关键点、数据范围为什么允许，以及还有哪些同题可行做法。",
+        "重点只写算法思想、复杂度、数据范围为什么允许；不要写长证明。",
         "不要讨论代码工程质量、模块化、可维护性。",
         "固定 JSON 格式：",
-        "{\"confidence\":0,\"your_solution_class\":\"\",\"best_solution\":null,\"alternative_algorithms\":[{\"name\":\"\",\"complexity\":\"\",\"evidence\":[\"\"],\"tradeoff\":\"\"}],\"uncertain_points\":[],\"source_priority\":[\"题解\",\"题面\",\"代码\",\"模型推断\"]}",
+        "{\"confidence\":0,\"your_solution_class\":\"\",\"best_solution\":null,\"alternative_algorithms\":[{\"name\":\"\",\"complexity\":\"\",\"evidence\":[\"\"],\"tradeoff\":\"\"}],\"uncertain_points\":[]}",
         "材料：",
         JSON.stringify(payload)
       ].join("\n")
@@ -695,6 +706,7 @@ function buildDiagnosisPayload(context) {
 }
 
 function buildReviewPayload(context) {
+  const problem = context.problem || {};
   return {
     submission: {
       recordId: context.recordId,
@@ -702,10 +714,34 @@ function buildReviewPayload(context) {
       title: context.title,
       language: context.language
     },
-    problem: context.problem,
-    accepted_code: context.sourceCode,
-    editorial_extracts: context.solutions
+    problem: {
+      pid: problem.pid,
+      title: problem.title,
+      difficulty: problem.difficulty,
+      tags: problem.tags,
+      source: problem.source,
+      statement: compactReviewStatement(problem.description)
+    },
+    inferred_algorithm_tags: inferAlgorithmTags(context),
+    accepted_code: plainLimit(context.sourceCode, 4500),
+    editorial_extracts: (context.solutions || []).slice(0, 4).map((solution) => ({
+      title: solution.title || "",
+      content: plainLimit(solution.content || "", 450)
+    }))
   };
+}
+
+function compactReviewStatement(text) {
+  text = String(text || "");
+  const dataIndex = text.search(/数据范围|说明\/提示|限制|Constraints|Hint/i);
+  const head = text.slice(0, 1600);
+  const tail = dataIndex >= 0 ? text.slice(dataIndex, dataIndex + 1200) : text.slice(-900);
+  return plainLimit(`${head}\n${tail}`, 2600);
+}
+
+function plainLimit(text, max) {
+  text = String(text || "");
+  return text.length > max ? text.slice(0, max) : text;
 }
 
 function normalizeDiagnosis(result, context) {
@@ -744,7 +780,7 @@ function normalizeReview(result, context) {
     your_solution_class: String(result.your_solution_class || "无法确定"),
     best_solution: result.best_solution ? withComplexity(result.best_solution, fallbackComplexity) : null,
     alternative_algorithms: Array.isArray(result.alternative_algorithms)
-      ? result.alternative_algorithms.slice(0, 3).map((item) => withComplexity(item, fallbackComplexity))
+      ? result.alternative_algorithms.slice(0, 2).map((item) => withComplexity(item, fallbackComplexity))
       : [],
     uncertain_points: cleanUncertainPoints(result.uncertain_points),
     source_priority: Array.isArray(result.source_priority) ? result.source_priority : ["题解", "题面", "代码", "模型推断"]
