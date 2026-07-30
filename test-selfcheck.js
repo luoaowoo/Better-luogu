@@ -67,5 +67,37 @@ const reviewPayload = backgroundContext.buildReviewPayload({
 assert(reviewPayload.accepted_code.length <= 4500);
 assert(reviewPayload.editorial_extracts.length <= 4);
 assert(reviewPayload.problem.statement.length <= 2600);
+assert(backgroundContext.buildHintMessages({ editorial_extracts: [{ content: "题解写明使用动态规划" }] })[1].content.includes("算法方向必须来自题解摘录"));
+assert.equal(backgroundContext.normalizeHint({ confidence: 80, algorithm: "DP", hints: [1, 2, 3, 4], implementation_notes: [1, 2, 3, 4], evidence: [1, 2, 3, 4] }).hints.length, 3);
+
+const contentSource = fs.readFileSync("content.js", "utf8");
+assert(contentSource.includes('button.disabled = false;\n      button.textContent = button.matches(":hover")'));
+assert(contentSource.includes('if (state.hintLoading) {\n      showProblemPopover();'));
+assert(contentSource.includes("dataset.postOptimize"));
+assert(contentSource.includes("mountArticleOptimizer"));
+assert(contentSource.includes("mountFriendLink"));
+assert(contentSource.includes("https://next.tboi.cn"));
+assert(contentSource.includes("🐂 🍺 的oj"));
+assert(contentSource.includes("findArticleEditor"));
+assert(contentSource.includes('location.pathname === "/article/_new"'));
+assert(contentSource.includes('.cm-editor .cm-content[contenteditable="true"]'));
+assert(contentSource.includes('document.execCommand("insertText"'));
+assert(contentSource.includes('ARTICLE_OPTIMIZE_LABEL = "AI 优化\\n(改为学术风格)"'));
+assert(contentSource.includes("CodeMirror"));
+assert(contentSource.includes('composer.getValue() !== state.postOriginal'));
+assert(contentSource.includes('["post", "article"].includes(state.mode)'));
+assert(contentSource.includes("function diffHtml"));
+assert(contentSource.includes("loe-diff-del"));
+assert(contentSource.includes("loe-diff-ins"));
+assert(contentSource.includes('contenteditable="true"'));
+assert(contentSource.includes("function postResultText"));
+assert(backgroundContext.buildPostOptimizeMessages({ text: "P1000 用dp 复杂度O(nlogn)", maxLength: 200 })[0].content.includes("更清楚、精炼、有逻辑"));
+assert(backgroundContext.buildPostOptimizeMessages({ text: "我就是我想的就是你好", maxLength: 200 })[0].content.includes("删冗余口癖"));
+assert(backgroundContext.buildPostOptimizeMessages({ text: "a b c", maxLength: 200 })[0].content.includes("Markdown 编号列表"));
+assert(backgroundContext.buildPostOptimizeMessages({ text: "啊啊啊", maxLength: 200 })[0].content.includes("不要删除“啊啊啊”"));
+assert.equal(backgroundContext.normalizePostOptimize({ optimized_text: "abcdef", format_fixes: ["a", "b", "c", "d", "e"] }, { maxLength: 3 }).optimized_text, "abc");
+assert.equal(backgroundContext.normalizePostOptimize({ optimized_text: "这是一大段完全新增的解释内容解释内容解释内容", format_fixes: [] }, { text: "你好", maxLength: 200 }).optimized_text, "你好");
+assert.equal(backgroundContext.cleanRepeatedText("就是就是你好啊啊啊"), "就是你好啊啊啊");
+assert(backgroundContext.postOptimizeMaxTokens("你好") <= 60);
 
 console.log("selfcheck ok");

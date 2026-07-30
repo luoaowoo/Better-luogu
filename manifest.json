@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "洛谷 AI 诊断助手",
-  "description": "在洛谷提交记录页按需生成诊断、满分复盘、同类题练习建议和个人错因记录。",
-  "version": "0.1.0",
+  "description": "为洛谷提供提交诊断、满分复盘、同类练习、被动算法提示和文字优化。",
+  "version": "0.2.0",
   "permissions": ["storage", "tabs"],
   "host_permissions": ["https://www.luogu.com.cn/*", "https://luogu.com.cn/*", "https://*/*"],
   "background": {

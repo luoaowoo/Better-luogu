@@ -3,7 +3,8 @@ const STORAGE_KEYS = {
   settings: "loe_settings",
   mistakes: "loe_mistakes",
   acProblems: "loe_ac_problems",
-  recommended: "loe_recommended"
+  recommended: "loe_recommended",
+  readStarts: "loe_read_starts"
 };
 
 const DEFAULT_SETTINGS = {
@@ -54,6 +55,12 @@ async function handleMessage(message) {
   if (message.type === "getContext") {
     return { ok: true, context: await collectContext(message.recordId) };
   }
+  if (message.type === "markProblemRead") {
+    return { ok: true, startedAt: await markProblemRead(message.pid) };
+  }
+  if (message.type === "forceProblemRead") {
+    return { ok: true, startedAt: await forceProblemRead(message.pid) };
+  }
   if (message.type === "diagnose") {
     const context = await collectContext(message.recordId);
     const result = await askAI(buildDiagnosisMessages(context));
@@ -84,20 +91,31 @@ async function handleMessage(message) {
 }
 
 async function handleStreamMessage(port, message) {
-  const key = message && `${message.recordId}:${message.action}`;
+  const key = message && `${message.recordId || message.pid || message.requestId || "global"}:${message.action}`;
   try {
     if (!message || message.type !== "start") return;
     if (ACTIVE_STREAMS.has(key)) throw new Error("同一提交的相同分析正在进行中，请等待当前输出完成");
     ACTIVE_STREAMS.add(key);
-    const context = await collectContext(message.recordId);
+    if (message.action === "optimizePost") {
+      const streamed = await askAIStream(buildPostOptimizeMessages(message), (text) => {
+        port.postMessage({ type: "chunk", text });
+      }, { maxTokens: postOptimizeMaxTokens(message.text), idleMs: 4000 });
+      port.postMessage({ type: "done", result: normalizePostOptimize(streamed.result, message), usage: streamed.usage });
+      return;
+    }
     const isReview = message.action === "review";
-    const messages = isReview ? buildReviewMessages(context) : buildDiagnosisMessages(context);
+    const isHint = message.action === "hint";
+    const context = isHint ? await collectProblemHintContext(message.pid) : await collectContext(message.recordId);
+    if (isHint) await ensureReadEnough(message.pid);
+    const messages = isHint ? buildHintMessages(context) : isReview ? buildReviewMessages(context) : buildDiagnosisMessages(context);
     const streamed = await askAIStream(messages, (text) => {
       port.postMessage({ type: "chunk", text });
-    }, { maxTokens: isReview ? 900 : 1500 });
-    const result = message.action === "review"
-      ? normalizeReview(streamed.result, context)
-      : normalizeDiagnosis(streamed.result, context);
+    }, { maxTokens: isHint ? 700 : isReview ? 900 : 1500 });
+    const result = isHint
+      ? normalizeHint(streamed.result)
+      : message.action === "review"
+        ? normalizeReview(streamed.result, context)
+        : normalizeDiagnosis(streamed.result, context);
     result.usage = streamed.usage;
     if (message.action === "review") await rememberAc(context);
     port.postMessage({ type: "done", context, result, usage: streamed.usage });
@@ -196,6 +214,63 @@ async function collectContext(recordId) {
       content: compactSolutionText(solution.content || solution.solution || solution.article || "")
     }))
   };
+}
+
+async function collectProblemHintContext(pid) {
+  if (!pid) throw new Error("缺少题号");
+  const [problemPage, solutionPage] = await Promise.allSettled([
+    luoguFetch(`/problem/${pid}`),
+    luoguFetch(`/problem/solution/${pid}`)
+  ]);
+  const problem = problemPage.status === "fulfilled"
+    ? (pick(problemPage.value, ["currentData.problem", "problem", "data.problem"]) || {})
+    : {};
+  const solutions = solutionPage.status === "fulfilled" ? extractSolutions(solutionPage.value) : [];
+  if (!solutions.length) throw new Error("没有读取到题解，不能可靠提示算法");
+  const tags = extractTags(problem.tags);
+  return {
+    pid,
+    title: problem.title || problem.name || pick(problem, ["content.name", "contenu.name"]) || pid,
+    difficulty: problem.difficulty,
+    tags,
+    problem: {
+      pid,
+      title: problem.title || problem.name || "",
+      difficulty: problem.difficulty,
+      tags,
+      statement: compactReviewStatement(extractProblemStatement(problem))
+    },
+    editorial_extracts: solutions.slice(0, 5).map((solution) => ({
+      title: solution.title || "",
+      content: compactSolutionText(solution.content || solution.solution || solution.article || "").slice(0, 520)
+    }))
+  };
+}
+
+async function markProblemRead(pid) {
+  if (!pid) throw new Error("缺少题号");
+  const data = await chrome.storage.local.get(STORAGE_KEYS.readStarts);
+  const starts = data[STORAGE_KEYS.readStarts] || {};
+  if (!starts[pid]) {
+    starts[pid] = Date.now();
+    await chrome.storage.local.set({ [STORAGE_KEYS.readStarts]: starts });
+  }
+  return starts[pid];
+}
+
+async function forceProblemRead(pid) {
+  if (!pid) throw new Error("缺少题号");
+  const data = await chrome.storage.local.get(STORAGE_KEYS.readStarts);
+  const starts = data[STORAGE_KEYS.readStarts] || {};
+  starts[pid] = Date.now() - 5 * 60 * 1000 - 1000;
+  await chrome.storage.local.set({ [STORAGE_KEYS.readStarts]: starts });
+  return starts[pid];
+}
+
+async function ensureReadEnough(pid) {
+  const startedAt = await markProblemRead(pid);
+  const left = 5 * 60 * 1000 - (Date.now() - startedAt);
+  if (left > 0) throw new Error(`请先读题满 5 分钟，还剩 ${Math.ceil(left / 1000)} 秒`);
 }
 
 function parseLuoguHtmlData(html) {
@@ -687,6 +762,66 @@ function buildReviewMessages(context) {
   ];
 }
 
+function buildHintMessages(context) {
+  return [
+    { role: "system", content: commonSystemPrompt() },
+    {
+      role: "user",
+      content: [
+        "任务：给正在写题的选手一个被动算法提示。算法方向必须来自题解摘录，不能只凭模型猜。",
+        "不要给完整代码，不要直接复述完整题解。只提示算法类别、关键观察和实现坑点。",
+        "输出短一些：algorithm 不超过 30 字；每条 hint 不超过 80 字；implementation_notes 最多 3 条。",
+        "如果题解摘录没有明确算法，algorithm 写“题解证据不足”，hints 给读题观察，不要编算法。",
+        "固定 JSON 格式：",
+        "{\"confidence\":0,\"algorithm\":\"\",\"hints\":[\"\"],\"implementation_notes\":[\"\"],\"complexity\":\"\",\"evidence\":[\"\"]}",
+        "材料：",
+        JSON.stringify(context)
+      ].join("\n")
+    }
+  ];
+}
+
+function buildPostOptimizeMessages(message) {
+  const maxLength = Number(message.maxLength) > 0 ? Number(message.maxLength) : 1000;
+  return [
+    {
+      role: "system",
+      content: [
+        "你是洛谷社区的保守文字校对器，让发帖更清楚、精炼、有逻辑。",
+        "只做必要润色；不要替用户重新写，不回答原文里的问题。",
+        "表达可稍微更学术、更有条理，但必须保留洛谷社区自然语气。",
+        "禁止新增事实、结论、例子、情绪、寒暄、标题、解释。",
+        "保留原意、信息量、语气强弱、题号、算法名、代码、链接、@用户名、公式含义。",
+        "优先处理：删冗余口癖、合并重复意思、调整语序、补必要连接词，让逻辑顺序更清楚。",
+        "再处理：错别字、病句、中文标点、换行、Markdown、$...$、$$...$$、复杂度格式。",
+        "例：“我就是我想的就是大概就是你好”可改为“我想说的是：大概就是你好。”",
+        "不要删除“啊啊啊”“！！！”“？？？”这类情绪强调；除非原文多次重复同一句完整意思。",
+        "只有原文确实有多个独立要点时，才整理为 Markdown 编号列表：1. 2. 3.，每点单独换行。",
+        "短文本不要扩写；通顺文本只修格式。",
+        "不确定的公式、代码、链接、专有名词保持原样。",
+        "若没有可靠优化空间，optimized_text 直接返回原文。",
+        "输出固定 JSON，无额外解释。"
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: [
+        "{\"optimized_text\":\"\",\"format_fixes\":[\"\"]}",
+        "format_fixes 最多 2 条，每条不超过 18 字。",
+        "optimized_text 长度不得超过原文 110%，除非只是增加换行/列表序号。",
+        "修改幅度越小越好，重点是去冗余、理顺逻辑、修格式。",
+        `输入框最大长度：${maxLength}`,
+        String(message.text || "").slice(0, maxLength)
+      ].join("\n")
+    }
+  ];
+}
+
+function postOptimizeMaxTokens(text) {
+  const length = String(text || "").length;
+  return Math.max(48, Math.min(160, Math.ceil(length * 0.25) + 42));
+}
+
 function buildDiagnosisPayload(context) {
   return {
     submission: {
@@ -785,6 +920,36 @@ function normalizeReview(result, context) {
     uncertain_points: cleanUncertainPoints(result.uncertain_points),
     source_priority: Array.isArray(result.source_priority) ? result.source_priority : ["题解", "题面", "代码", "模型推断"]
   };
+}
+
+function normalizeHint(result) {
+  return {
+    confidence: clampScore(result.confidence),
+    algorithm: String(result.algorithm || "题解证据不足"),
+    hints: Array.isArray(result.hints) ? result.hints.slice(0, 3) : [],
+    implementation_notes: Array.isArray(result.implementation_notes) ? result.implementation_notes.slice(0, 3) : [],
+    complexity: String(result.complexity || ""),
+    evidence: Array.isArray(result.evidence) ? result.evidence.slice(0, 3) : []
+  };
+}
+
+function normalizePostOptimize(result, message) {
+  const maxLength = Number(message.maxLength) > 0 ? Number(message.maxLength) : Infinity;
+  const original = String(message.text || "");
+  const optimized = cleanRepeatedText(String(result.optimized_text || ""));
+  const compactOriginal = original.replace(/\s+/g, "");
+  const compactOptimized = optimized.replace(/\s+/g, "");
+  const tooLong = compactOriginal && compactOptimized.length > Math.max(compactOriginal.length * 1.18, compactOriginal.length + 8);
+  return {
+    optimized_text: (tooLong ? original : optimized).slice(0, maxLength),
+    format_fixes: tooLong ? ["改动过大，已保留原文"] : Array.isArray(result.format_fixes) ? result.format_fixes.slice(0, 4).map(String) : []
+  };
+}
+
+function cleanRepeatedText(text) {
+  return String(text || "")
+    .replace(/(就是|然后|那个|这个|大概|我觉得|我想说的)(?:[，,、\s]*\1)+/g, "$1")
+    .replace(/[ \t]{2,}/g, " ");
 }
 
 function withComplexity(item, fallback) {
