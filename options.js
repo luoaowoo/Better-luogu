@@ -1,25 +1,22 @@
 const ids = ["baseURL", "apiKey", "model", "manualOnly"];
-const popupState = { recordId: "", context: null, loadedAnalysis: false };
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindTabs();
   bindSettings();
-  bindAnalysis();
+  bindWeeklySummary();
   await loadSettings();
+  await loadWeeklyCache();
 });
 
 function bindTabs() {
   document.querySelectorAll("[data-tab]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", () => {
       const tab = button.dataset.tab;
       document.querySelectorAll("[data-tab]").forEach((item) => item.classList.toggle("is-active", item === button));
       document.querySelectorAll("[data-page]").forEach((page) => {
         page.hidden = page.dataset.page !== tab;
       });
-      if (tab === "analysis" && !popupState.loadedAnalysis) {
-        popupState.loadedAnalysis = true;
-        await loadCurrentRecord();
-      }
+      if (tab === "weekly") loadWeeklyCache();
     });
   });
 }
@@ -36,9 +33,63 @@ function bindSettings() {
   });
 }
 
-function bindAnalysis() {
-  document.querySelectorAll("[data-action]").forEach((button) => {
-    button.addEventListener("click", () => runAction(button.dataset.action));
+function bindWeeklySummary() {
+  document.getElementById("weeklySummary").addEventListener("click", async () => {
+    const button = document.getElementById("weeklySummary");
+    button.disabled = true;
+    setWeeklyStatus("正在整理最近 7 天训练记录...");
+    setWeeklyOutput('<div class="loe-loading">生成中...</div>');
+    try {
+      const tab = await getActiveTab();
+      const [pageRecords, userId] = await Promise.all([scrapeActiveTabRecords(tab), scrapeActiveTabUser(tab)]);
+      if (pageRecords.length) setWeeklyStatus(`从当前评测记录页截取到 ${pageRecords.length} 条记录，正在生成...`);
+      const response = await chrome.runtime.sendMessage({ type: "weeklySummary", pageRecords, userId });
+      if (!response.ok) {
+        setWeeklyStatus(response.error, true);
+        setWeeklyOutput(`<div class="loe-error">${escapeHtml(response.error)}</div>`);
+        return;
+      }
+      renderWeekly(response.data, response.result);
+      const totals = response.data.totals || {};
+      setWeeklyStatus(response.cached ? "已显示 5 分钟内生成的本周总结。" : totals.submissions || totals.saved_mistakes ? "已生成本周训练复盘。" : "最近 7 天暂无本地记录。");
+    } catch (error) {
+      const message = error.message || String(error);
+      setWeeklyStatus(message, true);
+      setWeeklyOutput(`<div class="loe-error">${escapeHtml(message)}</div>`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+async function loadWeeklyCache() {
+  const response = await chrome.runtime.sendMessage({ type: "getWeeklySummaryCache" });
+  if (!response.ok || !response.cached) return;
+  renderWeekly(response.data, response.result);
+  setWeeklyStatus("已显示 5 分钟内生成的本周总结。");
+}
+
+async function scrapeActiveTabRecords(tab) {
+  if (!tab || !tab.id || !/^https:\/\/(?:www\.)?luogu\.com\.cn\/record/.test(tab.url || "")) return [];
+  const response = await sendTabMessage(tab.id, { type: "scrapeWeeklyRecords" });
+  return response && response.ok && Array.isArray(response.records) ? response.records : [];
+}
+
+async function scrapeActiveTabUser(tab) {
+  if (!tab || !tab.id || !/^https:\/\/(?:www\.)?luogu\.com\.cn\//.test(tab.url || "")) return "";
+  const response = await sendTabMessage(tab.id, { type: "scrapeLuoguUser" });
+  return response && response.ok ? response.userId || "" : "";
+}
+
+function getActiveTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => resolve(tabs[0]));
+  });
+}
+
+function sendTabMessage(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => resolve(chrome.runtime.lastError ? null : response));
   });
 }
 
@@ -52,196 +103,85 @@ async function loadSettings() {
   }
 }
 
-async function loadCurrentRecord() {
-  const tab = await getActiveTab();
-  const match = tab && tab.url && tab.url.match(/^https:\/\/(?:www\.)?luogu\.com\.cn\/record\/(\d+)/);
-  if (!match) {
-    disableAnalysis(true);
-    setAnalysisStatus("当前页面不是洛谷提交记录页。");
-    return;
-  }
-
-  popupState.recordId = match[1];
-  disableAnalysis(false);
-  setAnalysisStatus(`正在读取提交记录 ${popupState.recordId}...`);
-  const response = await chrome.runtime.sendMessage({ type: "getContext", recordId: popupState.recordId });
-  if (!response.ok) {
-    disableAnalysis(true);
-    setAnalysisStatus(response.error, true);
-    return;
-  }
-  popupState.context = response.context;
-  renderContext(response.context);
-}
-
-function getActiveTab() {
-  return new Promise((resolve) => {
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => resolve(tabs[0]));
-  });
-}
-
-function renderContext(context) {
-  setAnalysisStatus([
-    `${context.pid} ${context.title}`,
-    context.score === null ? context.statusText : `${context.score}/${context.fullScore}`,
-    context.isOiContest ? "可能是 OI 赛制，保持手动分析" : ""
-  ].filter(Boolean).join(" · "));
-  document.querySelector('[data-action="diagnose"]').disabled = context.isFullScore;
-  document.querySelector('[data-action="review"]').disabled = !context.isFullScore;
-  document.querySelector('[data-action="recommend"]').disabled = false;
-}
-
-async function runAction(action) {
-  if (!popupState.recordId) return;
-  if (action === "diagnose" || action === "review") return runStreamAction(action);
-
-  setOutput(`<div class="loe-loading">处理中...</div>`);
-  const response = await chrome.runtime.sendMessage({ type: action, recordId: popupState.recordId });
-  if (!response.ok) return setOutput(`<div class="loe-error">${escapeHtml(response.error)}</div>`);
-  popupState.context = response.context;
-  if (action === "recommend") renderRecommendations(response.result);
-}
-
-function runStreamAction(action) {
-  let raw = "";
-  let pending = false;
-  disableAnalysis(true);
-  setOutput(`
-    <div class="loe-token">Token：计算中...</div>
-    <div class="loe-live" data-live>正在等待模型输出...</div>
-  `);
-
-  const port = chrome.runtime.connect({ name: "loe-stream" });
-  port.postMessage({ type: "start", action, recordId: popupState.recordId });
-  port.onMessage.addListener((message) => {
-    if (message.type === "chunk") {
-      raw += message.text;
-      if (!pending) {
-        pending = true;
-        setTimeout(() => {
-          pending = false;
-          renderLive(raw);
-        }, 120);
-      }
-      return;
-    }
-    if (message.type === "done") {
-      popupState.context = message.context;
-      renderLive(raw);
-      renderContext(message.context);
-      if (action === "diagnose") renderDiagnosis(message.context, message.result);
-      if (action === "review") renderReview(message.result);
-      port.disconnect();
-      return;
-    }
-    if (message.type === "error") {
-      if (raw) {
-        renderLive(raw);
-        appendOutput(`<div class="loe-error">输出中断：${escapeHtml(message.error)}</div>`);
-      } else {
-        setOutput(`<div class="loe-error">${escapeHtml(message.error)}</div>`);
-      }
-      if (popupState.context) renderContext(popupState.context);
-      else disableAnalysis(false);
-      port.disconnect();
-    }
-  });
-}
-
-function renderDiagnosis(context, result) {
-  const reasons = (result.reasons || []).map((reason) => `
-    <article class="loe-card">
-      <b>${renderAiText(reason.type || "Unknown")} · ${renderAiText(reason.summary || "")}</b>
-      <p>${renderAiText(reason.why_possible || "")}</p>
-      <small>验证：${renderAiText(reason.verify || "")}</small>
-      ${renderList("证据", reason.evidence)}
-    </article>
-  `).join("");
-  setOutput(`
-    <div class="loe-score">证据充分度 ${escapeHtml(result.confidence)}%</div>
-    ${renderUsage(result.usage)}
-    <p>${renderAiText(result.overall_judgement)}</p>
-    ${reasons || "<p>证据不足，无法可靠分析。</p>"}
-    ${renderList("缺少信息", result.missing_info)}
-    <div class="loe-save">
-      <button type="button" data-save>加入错因库</button>
+function renderWeekly(data, result) {
+  const totals = data.totals || {};
+  setWeeklyOutput(`
+    <div class="loe-weekly-grid">
+      ${renderStat("提交", totals.submissions)}
+      ${renderStat("题目", totals.problems)}
+      ${renderStat("AC", totals.accepted)}
+      ${renderStat("错误", totals.errors)}
     </div>
+    <article class="loe-card">
+      <b>AI 总结</b>
+      <p>${renderAiText(result.overall_summary)}</p>
+    </article>
+    ${renderList("优势", result.strengths)}
+    ${renderList("主要短板", result.weaknesses)}
+    ${renderList("高频算法", result.frequent_tags)}
+    ${renderList("代表题目", result.representative_problems)}
+    ${renderList("错误模式", result.error_patterns)}
+    ${renderList("下周计划", result.next_week_plan)}
+    ${renderLocalStats(data)}
   `);
-  document.querySelector("[data-save]").addEventListener("click", () => saveMistake(context, result));
 }
 
-function renderReview(result) {
-  const alternatives = (result.alternative_algorithms || []).map((item) => `
-    <article class="loe-card">
-      <b>${renderAiText(item.name || "替代思路")}</b>
-      <p>${renderAiText(item.tradeoff || "")}</p>
-      <small>复杂度：${renderAiText(item.complexity)}</small>
-      ${renderList("证据", item.evidence)}
-    </article>
+function renderLocalStats(data) {
+  const problems = (data.problems || []).slice(0, 8).map((problem) => `
+    <li>
+      <a href="https://www.luogu.com.cn/problem/${encodeURIComponent(problem.pid)}" target="_blank" rel="noreferrer">
+        ${escapeHtml(problem.pid)} ${escapeHtml(problem.title || "")}
+      </a>
+      <small>${escapeHtml(problem.difficulty)} · ${escapeHtml(problem.attempts)} 次提交 · ${escapeHtml(problem.errors)} 次错误</small>
+    </li>
   `).join("");
-  setOutput(`
-    <div class="loe-score">证据充分度 ${escapeHtml(result.confidence)}%</div>
-    ${renderUsage(result.usage)}
-    <p>你的解法：${renderAiText(result.your_solution_class || "无法确定")}</p>
-    ${result.best_solution ? renderBest(result.best_solution) : ""}
-    ${alternatives || "<p>没有足够证据列出其他算法。</p>"}
-    ${renderList("不确定点", result.uncertain_points)}
-  `);
-}
-
-function renderBest(best) {
+  const mistakes = (data.mistakes || []).slice(0, 5).map((item) => `
+    <li>
+      <strong>${escapeHtml(item.pid || "未知题号")} ${escapeHtml(item.title || "")}</strong>
+      <small>${escapeHtml(item.result || "")}${item.errorType ? ` · ${escapeHtml(item.errorType)}` : ""}</small>
+      <small>${escapeHtml(item.reason || "暂无记录")}</small>
+    </li>
+  `).join("");
+  const recommendations = (data.recommendations || []).slice(0, 5).map((problem) => `
+    <li>
+      <a href="https://www.luogu.com.cn/problem/${encodeURIComponent(problem.pid)}" target="_blank" rel="noreferrer">
+        ${escapeHtml(problem.pid)} ${escapeHtml(problem.title || "")}
+      </a>
+      <small>${escapeHtml(problem.difficulty || "")} · ${escapeHtml((problem.tags || []).join("、"))}</small>
+      <small>${escapeHtml(problem.reason || "同难度同标签")}</small>
+    </li>
+  `).join("");
   return `
-    <article class="loe-card">
-      <b>题解最优思路：${renderAiText(best.name || "")}</b>
-      <p>${renderAiText(best.note || "")}</p>
-      <small>复杂度：${renderAiText(best.complexity)}</small>
-      ${renderList("证据", best.evidence)}
-    </article>
+    ${renderCounts("难度分布", data.difficulties)}
+    ${renderCounts("标签分布", data.tags)}
+    ${renderCounts("错误类型", data.verdicts)}
+    <div class="loe-weekly-problems">
+      <small>题目推荐</small>
+      <ul>${recommendations || "<li>暂无推荐</li>"}</ul>
+    </div>
+    <div class="loe-weekly-problems">
+      <small>本周题目</small>
+      <ul>${problems || "<li>暂无记录</li>"}</ul>
+    </div>
+    <div class="loe-weekly-problems">
+      <small>最近错因</small>
+      <ul>${mistakes || "<li>暂无记录</li>"}</ul>
+    </div>
   `;
 }
 
-function renderRecommendations(result) {
-  const problems = (result.problems || []).map((problem) => `
-    <a class="loe-card loe-link" href="https://www.luogu.com.cn/problem/${encodeURIComponent(problem.pid)}" target="_blank" rel="noreferrer">
-      <b>${escapeHtml(problem.pid)} ${escapeHtml(problem.title || "")}</b>
-      <small>难度：${escapeHtml(problem.difficulty)}${problem.source ? ` · 来源：${escapeHtml(problem.source)}` : ""} · ${escapeHtml((problem.tags || []).join("、"))}</small>
-      <p>${renderAiText(problem.reason || "")}</p>
-    </a>
-  `).join("");
-  setOutput(`
-    <p>${renderAiText(result.note || "只推荐同评级同标签题。")}</p>
-    ${problems || "<p>同难度同标签候选题不足。</p>"}
-  `);
+function renderStat(label, value) {
+  return `<div class="loe-weekly-stat"><small>${escapeHtml(label)}</small><b>${escapeHtml(value ?? 0)}</b></div>`;
 }
 
-async function saveMistake(context, result) {
-  const firstReason = result.reasons && result.reasons[0];
-  const response = await chrome.runtime.sendMessage({
-    type: "saveMistake",
-    record: {
-      pid: context.pid,
-      title: context.title,
-      recordId: context.recordId,
-      result: context.statusText || `${context.score}/${context.fullScore}`,
-      errorType: firstReason && firstReason.type,
-      aiConclusion: result.overall_judgement,
-      userReason: firstReason && firstReason.summary || "",
-      tags: [firstReason && firstReason.type, firstReason && firstReason.summary].filter(Boolean)
-    }
-  });
-  setAnalysisStatus(response.ok ? "已加入错因库" : response.error, !response.ok);
+function renderCounts(title, items) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return `<div class="loe-list"><small>${escapeHtml(title)}</small><ul>${items.map((item) => `<li>${escapeHtml(item.name)}：${escapeHtml(item.count)}</li>`).join("")}</ul></div>`;
 }
 
-function disableAnalysis(disabled) {
-  document.querySelectorAll("[data-action]").forEach((button) => {
-    button.disabled = disabled;
-  });
-}
-
-function setAnalysisStatus(text, isError) {
-  const node = document.getElementById("analysisStatus");
-  node.textContent = text;
-  node.classList.toggle("loe-error-text", Boolean(isError));
+function renderList(title, items) {
+  if (!Array.isArray(items) || items.length === 0) return "";
+  return `<div class="loe-list"><small>${escapeHtml(title)}</small><ul>${items.map((item) => `<li>${renderAiText(item)}</li>`).join("")}</ul></div>`;
 }
 
 function setText(id, text, isError) {
@@ -250,50 +190,14 @@ function setText(id, text, isError) {
   node.className = isError ? "loe-error-text" : "";
 }
 
-function setOutput(html) {
-  document.getElementById("analysisOutput").innerHTML = html;
+function setWeeklyStatus(text, isError) {
+  const node = document.getElementById("weeklyStatus");
+  node.textContent = text;
+  node.classList.toggle("loe-error-text", Boolean(isError));
 }
 
-function appendOutput(html) {
-  document.getElementById("analysisOutput").insertAdjacentHTML("beforeend", html);
-}
-
-function renderList(title, items) {
-  if (!Array.isArray(items) || items.length === 0) return "";
-  return `<div class="loe-list"><small>${escapeHtml(title)}</small><ul>${items.map((item) => `<li>${renderAiText(item)}</li>`).join("")}</ul></div>`;
-}
-
-function renderUsage(usage) {
-  if (!usage) return "";
-  const prompt = usage.prompt_tokens ?? "?";
-  const completion = usage.completion_tokens ?? "?";
-  const total = usage.total_tokens ?? "?";
-  const mark = usage.estimated ? "约 " : "";
-  return `<div class="loe-token">Token：${mark}${escapeHtml(total)}（输入 ${escapeHtml(prompt)} / 输出 ${escapeHtml(completion)}）</div>`;
-}
-
-function renderLive(raw) {
-  const node = document.querySelector("[data-live]");
-  if (!node) return;
-  const preview = streamPreview(raw);
-  node.innerHTML = preview.map((line) => `<p>${renderAiText(line)}</p>`).join("") || "正在生成...";
-  node.scrollTop = node.scrollHeight;
-}
-
-function streamPreview(raw) {
-  const text = String(raw || "").slice(-3000);
-  return [
-    extractJsonString(text, "overall_judgement") || extractJsonString(text, "your_solution_class"),
-    extractJsonString(text, "summary"),
-    extractJsonString(text, "why_possible") || extractJsonString(text, "note"),
-    extractJsonString(text, "verify") || extractJsonString(text, "tradeoff")
-  ].filter(Boolean);
-}
-
-function extractJsonString(text, key) {
-  const match = text.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`));
-  if (!match) return "";
-  return match[1].replace(/\\"/g, "\"").replace(/\\n/g, "\n").replace(/\\\\/g, "\\");
+function setWeeklyOutput(html) {
+  document.getElementById("weeklyOutput").innerHTML = html;
 }
 
 function escapeHtml(value) {

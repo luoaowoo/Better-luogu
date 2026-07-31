@@ -5,14 +5,29 @@
   const POST_ROOT_ID = "loe-post-root";
   const ARTICLE_ROOT_ID = "loe-article-root";
   const FRIEND_LINK_ID = "loe-friend-link";
+  const FILTER_ROOT_ID = "loe-filter-random-root";
+  const FILTER_MODAL_ID = "loe-filter-random-modal";
+  const FILTER_PREFS_KEY = "loe_filtered_random";
   const OPTIMIZE_LABEL = "AI 优化(改为学术风格)";
   const ARTICLE_OPTIMIZE_LABEL = "AI 优化\n(改为学术风格)";
+  const DIFFICULTIES = [
+    { value: "0", label: "暂无评定" },
+    { value: "1", label: "入门" },
+    { value: "2", label: "普及-" },
+    { value: "3", label: "普及/提高-" },
+    { value: "4", label: "普及+/提高" },
+    { value: "5", label: "提高+/省选-" },
+    { value: "6", label: "省选/NOI-" },
+    { value: "7", label: "NOI/NOI+/CTSC" }
+  ];
   const READ_MS = 5 * 60 * 1000;
   const DEBUG_CTRL_LIMIT = 10;
   const DEBUG_CTRL_WINDOW = 1400;
   let lastUrl = "";
   let state = {};
   let debugShortcutBound = false;
+  let filterTags = [];
+  let filterPrefs = { difficulties: [], tagIds: [], excludeAc: true, requireAllTags: false };
 
   init();
   setInterval(() => {
@@ -21,6 +36,7 @@
     if (root) placeRoot(root);
     if (isHomePage() && !document.getElementById(POST_ROOT_ID)) mountPostOptimizer();
     if (isHomePage() && !document.getElementById(FRIEND_LINK_ID)) mountFriendLink();
+    if (isHomePage() && !document.getElementById(FILTER_ROOT_ID)) mountFilteredRandom();
     if (isArticleEditorPage() && !document.getElementById(ARTICLE_ROOT_ID)) mountArticleOptimizer();
     updateProblemGate();
     positionProblemPopover();
@@ -37,6 +53,8 @@
     const problemPopoverExisting = document.getElementById(PROBLEM_POPOVER_ID);
     const postExisting = document.getElementById(POST_ROOT_ID);
     const articleExisting = document.getElementById(ARTICLE_ROOT_ID);
+    const filterExisting = document.getElementById(FILTER_ROOT_ID);
+    const filterModalExisting = document.getElementById(FILTER_MODAL_ID);
     if (!recordId) {
       if (existing) existing.remove();
     }
@@ -45,6 +63,8 @@
       if (problemPopoverExisting) problemPopoverExisting.remove();
     }
     if (!isHome && postExisting) postExisting.remove();
+    if (!isHome && filterExisting) filterExisting.remove();
+    if (!isHome && filterModalExisting) filterModalExisting.remove();
     if (!isArticle && articleExisting) articleExisting.remove();
     if (!isHome && !isArticle) document.querySelector(".loe-post-preview")?.remove();
     if (!recordId && !pid && !isHome && !isArticle) return;
@@ -66,6 +86,8 @@
       if (postExisting && state.mode === "post") return;
       state = { mode: "post", postOriginal: "", postLoading: false, postDone: false, postStale: false };
       mountPostOptimizer();
+      mountFriendLink();
+      mountFilteredRandom();
       return;
     }
     if (isArticle) {
@@ -137,6 +159,228 @@
     link.textContent = "ZYZOJ";
     paragraph.append(heading, document.createElement("br"), link);
     firstGroup.insertAdjacentElement("afterend", paragraph);
+  }
+
+  function mountFilteredRandom() {
+    const target = findHomeProblemJump();
+    if (!target || document.getElementById(FILTER_ROOT_ID)) return;
+    const root = document.createElement("div");
+    root.id = FILTER_ROOT_ID;
+    root.innerHTML = `<button type="button" class="loe-filter-random-button">筛选随机题</button>`;
+    const button = root.querySelector("button");
+    copyNativeButtonStyle(target.random, button);
+    button.classList.add("loe-filter-random-button");
+    button.addEventListener("click", () => openFilteredRandomModal());
+    target.row.classList.add("loe-filter-random-row");
+    target.row.appendChild(root);
+  }
+
+  function findHomeProblemJump() {
+    const random = [...document.querySelectorAll("button, a")]
+      .find((node) => (node.innerText || node.textContent || "").includes("随机跳题"));
+    if (!random) return null;
+    let row = random.parentElement;
+    while (row && row !== document.body) {
+      const text = row.innerText || "";
+      const rect = row.getBoundingClientRect();
+      if (text.includes("跳转") && text.includes("随机跳题") && rect.height <= 120) break;
+      row = row.parentElement;
+    }
+    return { random, row: row && row !== document.body ? row : random.parentElement };
+  }
+
+  async function openFilteredRandomModal() {
+    const modal = ensureFilteredRandomModal();
+    modal.hidden = false;
+    renderFilteredRandomModal();
+    try {
+      await loadFilterPrefs();
+      if (!filterTags.length) {
+        const response = await send({ type: "filteredRandomTags" });
+        if (!response.ok) throw new Error(response.error);
+        filterTags = response.tags || [];
+      }
+      renderFilteredRandomModal();
+    } catch (error) {
+      setFilterStatus(error.message || String(error), true);
+    }
+  }
+
+  function ensureFilteredRandomModal() {
+    let modal = document.getElementById(FILTER_MODAL_ID);
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = FILTER_MODAL_ID;
+    modal.hidden = true;
+    modal.innerHTML = `
+      <div class="loe-filter-backdrop" data-filter-action="close"></div>
+      <div class="loe-filter-dialog">
+        <div class="loe-filter-head">
+          <strong>筛选随机题</strong>
+          <button type="button" data-filter-action="close">×</button>
+        </div>
+        <section>
+          <small>难度</small>
+          <div class="loe-filter-chips" data-filter-difficulties></div>
+        </section>
+        <section>
+          <div class="loe-filter-section-title">
+            <small>算法</small>
+            <button type="button" data-filter-action="select-all-tags">全选算法</button>
+          </div>
+          <input type="search" data-filter-search placeholder="搜索算法标签">
+          <div class="loe-filter-chips loe-filter-tag-list" data-filter-tags></div>
+        </section>
+        <label class="loe-filter-check"><input type="checkbox" data-filter-exclude> 排除已通过题目</label>
+        <label class="loe-filter-check"><input type="checkbox" data-filter-all> 多个算法必须同时包含</label>
+        <button type="button" class="loe-filter-submit" data-filter-action="random">随机跳题</button>
+        <div class="loe-filter-status" data-filter-status></div>
+      </div>
+    `;
+    modal.addEventListener("click", onFilterModalClick);
+    modal.addEventListener("input", (event) => {
+      if (event.target.matches("[data-filter-search]")) renderFilterTags(event.target.value);
+    });
+    modal.addEventListener("wheel", trapFilterWheel, { passive: false });
+    modal.addEventListener("change", (event) => {
+      if (event.target.matches("[data-filter-exclude]")) filterPrefs.excludeAc = event.target.checked;
+      if (event.target.matches("[data-filter-all]")) filterPrefs.requireAllTags = event.target.checked;
+      saveFilterPrefs();
+    });
+    document.body.appendChild(modal);
+    return modal;
+  }
+
+  async function onFilterModalClick(event) {
+    const action = event.target.closest("[data-filter-action]")?.dataset.filterAction;
+    if (action === "close") {
+      document.getElementById(FILTER_MODAL_ID).hidden = true;
+      return;
+    }
+    if (action === "select-all-tags") {
+      if (!filterTags.length) return setFilterStatus("算法标签还没加载完", true);
+      const selected = new Set(filterPrefs.tagIds || []);
+      const allSelected = filterTags.every((tag) => selected.has(String(tag.id)));
+      filterPrefs.tagIds = allSelected ? [] : filterTags.map((tag) => String(tag.id));
+      if (!allSelected) filterPrefs.requireAllTags = false;
+      renderFilteredRandomModal();
+      saveFilterPrefs();
+      return;
+    }
+    const diff = event.target.closest("[data-filter-diff]")?.dataset.filterDiff;
+    if (diff !== undefined) {
+      toggleFilterValue("difficulties", diff);
+      renderFilterDifficulties();
+      saveFilterPrefs();
+      return;
+    }
+    const tag = event.target.closest("[data-filter-tag]")?.dataset.filterTag;
+    if (tag !== undefined) {
+      toggleFilterValue("tagIds", tag);
+      renderFilteredRandomModal();
+      saveFilterPrefs();
+      return;
+    }
+    if (action === "random") runFilteredRandom();
+  }
+
+  function renderFilteredRandomModal() {
+    renderFilterDifficulties();
+    renderFilterTags(document.querySelector(`#${FILTER_MODAL_ID} [data-filter-search]`)?.value || "");
+    const exclude = document.querySelector(`#${FILTER_MODAL_ID} [data-filter-exclude]`);
+    const all = document.querySelector(`#${FILTER_MODAL_ID} [data-filter-all]`);
+    const selectAll = document.querySelector(`#${FILTER_MODAL_ID} [data-filter-action="select-all-tags"]`);
+    if (exclude) exclude.checked = filterPrefs.excludeAc !== false;
+    if (all) all.checked = Boolean(filterPrefs.requireAllTags);
+    if (selectAll) {
+      const selected = new Set(filterPrefs.tagIds || []);
+      selectAll.textContent = filterTags.length && filterTags.every((tag) => selected.has(String(tag.id))) ? "取消全选" : "全选算法";
+    }
+    setFilterStatus(filterTags.length ? "" : "正在读取洛谷算法标签...");
+  }
+
+  function renderFilterDifficulties() {
+    const box = document.querySelector(`#${FILTER_MODAL_ID} [data-filter-difficulties]`);
+    if (!box) return;
+    const selected = new Set(filterPrefs.difficulties || []);
+    box.innerHTML = DIFFICULTIES.map((item) => `
+      <button type="button" class="loe-filter-chip loe-difficulty-${item.value}${selected.has(item.value) ? " is-active" : ""}" data-filter-diff="${item.value}">
+        ${escapeHtml(item.label)}
+      </button>
+    `).join("");
+  }
+
+  function renderFilterTags(query = "") {
+    const box = document.querySelector(`#${FILTER_MODAL_ID} [data-filter-tags]`);
+    if (!box) return;
+    const selected = new Set(filterPrefs.tagIds || []);
+    const keyword = query.trim().toLowerCase();
+    const tags = filterTags
+      .filter((tag) => selected.has(String(tag.id)) || !keyword || tag.name.toLowerCase().includes(keyword))
+      .slice(0, 80);
+    box.innerHTML = tags.map((tag) => `
+      <button type="button" class="loe-filter-chip${selected.has(String(tag.id)) ? " is-active" : ""}" data-filter-tag="${escapeHtml(tag.id)}">
+        ${escapeHtml(tag.name)}
+      </button>
+    `).join("") || `<span class="loe-filter-empty">没有匹配的算法标签</span>`;
+  }
+
+  async function runFilteredRandom() {
+    const modal = document.getElementById(FILTER_MODAL_ID);
+    const submit = modal && modal.querySelector("[data-filter-action='random']");
+    if (!filterPrefs.difficulties.length) return setFilterStatus("先选择至少一个难度", true);
+    if (!filterPrefs.tagIds.length) return setFilterStatus("先选择至少一个算法标签", true);
+    if (submit) {
+      submit.disabled = true;
+      submit.textContent = "筛选中...";
+    }
+    setFilterStatus("正在从洛谷题库筛选...");
+    await saveFilterPrefs();
+    const response = await send({ type: "filteredRandomProblem", filters: filterPrefs });
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = "随机跳题";
+    }
+    if (!response.ok) return setFilterStatus(response.error, true);
+    location.href = `/problem/${response.problem.pid}`;
+  }
+
+  function toggleFilterValue(key, value) {
+    const set = new Set((filterPrefs[key] || []).map(String));
+    set.has(value) ? set.delete(value) : set.add(value);
+    filterPrefs[key] = [...set];
+  }
+
+  function trapFilterWheel(event) {
+    const scroller = event.target.closest(".loe-filter-tag-list, .loe-filter-dialog");
+    if (!scroller) return event.preventDefault();
+    const canScroll = scroller.scrollHeight > scroller.clientHeight;
+    const atTop = scroller.scrollTop <= 0;
+    const atBottom = Math.ceil(scroller.scrollTop + scroller.clientHeight) >= scroller.scrollHeight;
+    if (!canScroll || event.deltaY < 0 && atTop || event.deltaY > 0 && atBottom) event.preventDefault();
+    event.stopPropagation();
+  }
+
+  async function loadFilterPrefs() {
+    const data = await chrome.storage.local.get(FILTER_PREFS_KEY);
+    const saved = data[FILTER_PREFS_KEY] || {};
+    filterPrefs = {
+      difficulties: Array.isArray(saved.difficulties) ? saved.difficulties.map(String) : [],
+      tagIds: Array.isArray(saved.tagIds) ? saved.tagIds.map(String) : [],
+      excludeAc: saved.excludeAc !== false,
+      requireAllTags: Boolean(saved.requireAllTags)
+    };
+  }
+
+  function saveFilterPrefs() {
+    return chrome.storage.local.set({ [FILTER_PREFS_KEY]: filterPrefs });
+  }
+
+  function setFilterStatus(text, isError = false) {
+    const node = document.querySelector(`#${FILTER_MODAL_ID} [data-filter-status]`);
+    if (!node) return;
+    node.textContent = text || "";
+    node.classList.toggle("loe-error-text", Boolean(isError));
   }
 
   function mountArticleOptimizer() {
@@ -424,7 +668,7 @@
     root.innerHTML = `
       <section class="loe-panel">
         <header class="loe-header">
-          <strong>洛谷 AI 诊断助手</strong>
+          <strong>Better-luogu（更好的洛谷）</strong>
         </header>
         <div class="loe-status">正在读取提交记录 ${escapeHtml(recordId)}...</div>
         <div class="loe-actions">
@@ -536,7 +780,7 @@
       button.disabled = left > 0;
       button.textContent = left > 0 ? `读题 ${formatLeft(left)}` : popover && !popover.hidden ? "收回" : "算法提示";
     }
-    button.title = left > 0 ? `还剩 ${formatLeft(left)}，调试时可连按 10 次 Ctrl 直接跳过` : "点击查看或收回题解算法提示";
+    button.title = left > 0 ? `还剩 ${formatLeft(left)}` : "点击查看或收回题解算法提示";
   }
 
   function formatLeft(ms) {
@@ -907,7 +1151,7 @@
         tags: [firstReason && firstReason.type, firstReason && firstReason.summary].filter(Boolean)
       }
     });
-    setStatus(response.ok ? "已加入错因库" : response.error, !response.ok);
+    setStatus(response.ok ? response.duplicate ? "错因已存在，未重复记录" : "已加入错因库" : response.error, !response.ok);
   }
 
   function setStatus(text, isError) {
@@ -969,6 +1213,131 @@
     const match = text.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`));
     if (!match) return "";
     return match[1].replace(/\\"/g, "\"").replace(/\\n/g, "\n").replace(/\\\\/g, "\\");
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || !["scrapeWeeklyRecords", "scrapeLuoguUser"].includes(message.type)) return;
+    try {
+      if (message.type === "scrapeWeeklyRecords") sendResponse({ ok: true, records: scrapeWeeklyRecords() });
+      if (message.type === "scrapeLuoguUser") sendResponse({ ok: true, userId: scrapeLuoguUserId() });
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message || String(error) });
+    }
+  });
+
+  function scrapeLuoguUserId() {
+    const context = readLentilleContext();
+    const id = findUserId(context);
+    if (id) return id;
+    const topLink = [...document.querySelectorAll('a[href*="/user/"]')]
+      .map((link) => ({ link, rect: link.getBoundingClientRect(), match: link.href.match(/\/user\/(\d+)/) }))
+      .find((item) => item.match && item.rect.top >= 0 && item.rect.top < 180 && item.rect.left > window.innerWidth * 0.35);
+    if (topLink) return topLink.match[1];
+    const match = document.documentElement.innerHTML.match(/\/user\/(\d+)/);
+    return match ? match[1] : "";
+  }
+
+  function readLentilleContext() {
+    const node = document.getElementById("lentille-context");
+    if (!node) return null;
+    try {
+      return JSON.parse(node.textContent || "{}");
+    } catch {
+      return null;
+    }
+  }
+
+  function findUserId(value, depth = 0) {
+    if (!value || typeof value !== "object" || depth > 5) return "";
+    for (const key of ["currentUser", "loginUser", "me", "user"]) {
+      const user = value[key];
+      const id = user && (user.uid || user.id || user.userId);
+      if (id) return String(id);
+    }
+    for (const item of Object.values(value)) {
+      const id = findUserId(item, depth + 1);
+      if (id) return id;
+    }
+    return "";
+  }
+
+  function scrapeWeeklyRecords() {
+    if (!location.pathname.startsWith("/record")) return [];
+    const rows = new Set();
+    return [...document.querySelectorAll('a[href*="/problem/"]')]
+      .map((anchor) => {
+        const pid = extractRecordPid(`${anchor.href} ${anchor.textContent}`);
+        const row = pid && findRecordListRow(anchor);
+        if (!row || rows.has(row)) return null;
+        rows.add(row);
+        return parseRecordListRow(row, anchor, pid);
+      })
+      .filter(Boolean)
+      .slice(0, 80);
+  }
+
+  function findRecordListRow(anchor) {
+    const direct = anchor.closest("tr, li, article");
+    if (direct && parseRecordListTime(direct.innerText || "")) return direct;
+    let node = anchor.parentElement;
+    while (node && node !== document.body) {
+      const text = node.innerText || "";
+      const rect = node.getBoundingClientRect();
+      if (parseRecordListTime(text) && extractRecordListStatus(text) && rect.width >= 280 && rect.height >= 28 && rect.height <= 150) return node;
+      node = node.parentElement;
+    }
+    return anchor.parentElement;
+  }
+
+  function parseRecordListRow(row, anchor, pid) {
+    const text = row.innerText || "";
+    const statusText = extractRecordListStatus(text);
+    const submittedAt = parseRecordListTime(text);
+    if (!statusText && !submittedAt) return null;
+    const recordMatch = row.innerHTML.match(/\/record\/(\d+)/);
+    return {
+      recordId: recordMatch ? recordMatch[1] : "",
+      pid,
+      title: normalizeRecordTitle(anchor.textContent || pid),
+      score: extractRecordListScore(text, statusText),
+      statusText,
+      submittedAt,
+      verdicts: statusText && !/Accepted|AC|通过/.test(statusText) ? [statusText] : []
+    };
+  }
+
+  function extractRecordPid(text) {
+    const match = String(text || "").match(/\b[PBU]\d+\b/);
+    return match && match[0];
+  }
+
+  function normalizeRecordTitle(text) {
+    return String(text || "").replace(/\s+/g, " ").trim();
+  }
+
+  function extractRecordListStatus(text) {
+    const match = String(text || "").match(/Accepted|Unaccepted|Wrong Answer|Runtime Error|Compile Error|Time Limit Exceeded|Memory Limit Exceeded|Output Limit Exceeded|\bAC\b|\bWA\b|\bRE\b|\bCE\b|\bTLE\b|\bMLE\b|\bOLE\b|通过|答案错误|运行时错误|编译错误|时间超限|内存超限/);
+    return match ? match[0] : "";
+  }
+
+  function extractRecordListScore(text, statusText) {
+    if (!statusText) return null;
+    const escaped = statusText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = String(text || "").match(new RegExp(`${escaped}\\s+(\\d{1,4})(?:\\s|$)`));
+    if (match) return Number(match[1]);
+    return /Accepted|AC|通过/.test(statusText) ? 100 : null;
+  }
+
+  function parseRecordListTime(text) {
+    text = String(text || "");
+    let match = text.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6] || 0)).getTime();
+    match = text.match(/(\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (!match) return null;
+    const now = new Date();
+    const date = new Date(now.getFullYear(), Number(match[1]) - 1, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5] || 0));
+    if (date.getTime() > Date.now() + 24 * 60 * 60 * 1000) date.setFullYear(date.getFullYear() - 1);
+    return date.getTime();
   }
 
   function send(message) {

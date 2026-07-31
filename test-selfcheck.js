@@ -21,6 +21,15 @@ for (const file of ["background.js", "content.js", "options.js"]) {
   new vm.Script(fs.readFileSync(file, "utf8"), { filename: file });
 }
 
+const optionsHtml = fs.readFileSync("options.html", "utf8");
+const optionsSource = fs.readFileSync("options.js", "utf8");
+assert(optionsHtml.includes("本周总结"));
+assert(!optionsHtml.includes("错误分析"));
+assert(optionsSource.includes("weeklySummary"));
+assert(optionsSource.includes("scrapeActiveTabRecords"));
+assert(optionsSource.includes("loadWeeklyCache"));
+assert(optionsSource.includes("题目推荐"));
+
 const backgroundContext = {
   chrome: {
     runtime: {
@@ -53,6 +62,13 @@ assert.equal(backgroundContext.cleanDiagnosisNotes(["不要把本次归为 TLE",
 const localRecommendations = backgroundContext.buildRecommendationResult([{ pid: "P1000", title: "A+B", difficulty: 1, tags: ["模拟"], reason: "同评级" }]);
 assert.equal(localRecommendations.problems.length, 1);
 assert(localRecommendations.note.includes("洛谷题库接口"));
+assert.deepEqual(backgroundContext.cleanFilterIds(["2", "x", "2", ""]), ["2"]);
+assert.deepEqual(backgroundContext.problemTagIds({ tags: [3, { id: 45 }, null] }), ["3", "45"]);
+assert(backgroundContext.algorithmTagRank({ name: "模拟" }) < backgroundContext.algorithmTagRank({ name: "线段树" }));
+assert(backgroundContext.algorithmTagRank({ name: "线段树" }) < backgroundContext.algorithmTagRank({ name: "网络流" }));
+assert(backgroundContext.algorithmTagRank({ name: "数组" }) < backgroundContext.algorithmTagRank({ name: "树状数组" }));
+assert(backgroundContext.algorithmTagRank({ name: "模拟" }) < backgroundContext.algorithmTagRank({ name: "模拟退火" }));
+assert.equal(backgroundContext.normalizeFilteredProblem({ pid: "P1", name: "T", difficulty: 2, tags: [3] }, new Map([["3", "动态规划 DP"]]), ["3"], false, 7).selectedTags[0], "动态规划 DP");
 assert.equal(backgroundContext.readableSource({ name: "CSP-S 2024" }), "CSP-S 2024");
 assert.equal(backgroundContext.normalizeProblem({ pid: "P1", title: "T", difficulty: 3, source: { name: "NOIP" }, tags: [{ name: "数学" }] }, 3).source, "NOIP");
 const reviewPayload = backgroundContext.buildReviewPayload({
@@ -69,13 +85,48 @@ assert(reviewPayload.editorial_extracts.length <= 4);
 assert(reviewPayload.problem.statement.length <= 2600);
 assert(backgroundContext.buildHintMessages({ editorial_extracts: [{ content: "题解写明使用动态规划" }] })[1].content.includes("算法方向必须来自题解摘录"));
 assert.equal(backgroundContext.normalizeHint({ confidence: 80, algorithm: "DP", hints: [1, 2, 3, 4], implementation_notes: [1, 2, 3, 4], evidence: [1, 2, 3, 4] }).hints.length, 3);
+assert(backgroundContext.buildWeeklySummaryMessages({ totals: { submissions: 1 }, problems: [] })[0].content.includes("训练复盘"));
+assert.equal(backgroundContext.normalizeWeeklySummary({ overall_summary: "ok", strengths: [1, 2, 3, 4, 5] }).strengths.length, 4);
+assert(backgroundContext.emptyWeeklySummary().overall_summary.includes("最近 7 天"));
+assert.equal(backgroundContext.difficultyLabel(4), "普及+/提高");
+const mergedWeekly = backgroundContext.mergeWeeklyRecords([
+  { recordId: "1", pid: "P1000", title: "P1000", time: 1000, tags: [] },
+  { recordId: "1", pid: "P1000", title: "A+B", difficulty: 1, tags: ["模拟"], time: 2000 }
+]);
+assert.equal(mergedWeekly.length, 1);
+assert.equal(mergedWeekly[0].title, "A+B");
+assert.deepEqual(backgroundContext.dedupeByKey([{ recordId: "1" }, { recordId: "1" }], backgroundContext.mistakeKey).length, 1);
+assert.deepEqual(backgroundContext.normalizeWeeklyTags(["82", "DP"], new Map([["82", "动态规划"]])), ["动态规划", "DP"]);
+assert(fs.readFileSync("background.js", "utf8").includes("getTagNameMap"));
+assert(backgroundContext.timeOrNull("1720000000") > 0);
+assert.equal(backgroundContext.extractRecordList({ currentData: { records: { result: [{ problem: { pid: "P1000" }, score: 100, status: 12, time: 1720000000 }] } } }).length, 1);
+assert.equal(backgroundContext.extractRecordList({ data: { records: { records: [{ problem: { pid: "P1001" }, score: 0, status: 6, time: 1720000000 }] } } }).length, 1);
+assert.equal(backgroundContext.normalizeRecordListItem({ problem: { pid: "P1000", title: "A+B" }, score: 100, status: 12, time: 1720000000 }).isFullScore, true);
 
 const contentSource = fs.readFileSync("content.js", "utf8");
-assert(contentSource.includes('button.disabled = false;\n      button.textContent = button.matches(":hover")'));
-assert(contentSource.includes('if (state.hintLoading) {\n      showProblemPopover();'));
+assert(contentSource.includes("scrapeWeeklyRecords"));
+assert(contentSource.includes("parseRecordListTime"));
+assert(contentSource.includes("scrapeLuoguUser"));
+assert(contentSource.includes("findUserId"));
+assert(fs.readFileSync("background.js", "utf8").includes("WEEKLY_CACHE_TTL"));
+assert(contentSource.includes("button.disabled = false;"));
+assert(contentSource.includes('button.textContent = button.matches(":hover")'));
+assert(contentSource.includes("if (state.hintLoading)"));
+assert(contentSource.includes("showProblemPopover();"));
 assert(contentSource.includes("dataset.postOptimize"));
 assert(contentSource.includes("mountArticleOptimizer"));
 assert(contentSource.includes("mountFriendLink"));
+assert(contentSource.includes("mountFilteredRandom"));
+assert(contentSource.includes("filteredRandomProblem"));
+assert(contentSource.includes("select-all-tags"));
+assert(contentSource.includes("allSelected ? [] : filterTags.map"));
+assert(contentSource.includes("if (!allSelected) filterPrefs.requireAllTags = false"));
+assert(contentSource.includes("trapFilterWheel"));
+assert(contentSource.includes("取消全选"));
+assert(contentSource.includes("多个算法必须同时包含"));
+assert(!contentSource.includes("filterTags.indexOf(a) - filterTags.indexOf(b)"));
+assert(!contentSource.includes("已选择全部"));
+assert(fs.readFileSync("background.js", "utf8").includes("MAX_FILTER_ALL_TAGS = 8"));
 assert(contentSource.includes("https://next.tboi.cn"));
 assert(contentSource.includes("🐂 🍺 的oj"));
 assert(contentSource.includes("findArticleEditor"));
