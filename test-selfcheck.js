@@ -13,11 +13,31 @@ assert.equal(manifest.background.service_worker, "background.js");
 assert.equal(manifest.options_page, "options.html");
 assert.equal(manifest.action.default_popup, "options.html");
 
-for (const file of ["background.js", "content.js", "options.js", "styles.css", "options.html"]) {
+const backgroundFiles = [
+  "background-common.js",
+  "background-luogu.js",
+  "background-ai.js",
+  "background-weekly.js",
+  "background-recommend.js",
+  "background-storage.js",
+  "background.js"
+];
+const contentFiles = [
+  "content-core.js",
+  "content-utils.js",
+  "content-home.js",
+  "content-record.js",
+  "content-problem.js",
+  "content-scrape.js",
+  "content.js"
+];
+assert.deepEqual(manifest.content_scripts[0].js, contentFiles);
+
+for (const file of [...backgroundFiles, ...contentFiles, "options.js", "styles.css", "options.html"]) {
   assert(fs.existsSync(file), `${file} missing`);
 }
 
-for (const file of ["background.js", "content.js", "options.js"]) {
+for (const file of [...backgroundFiles, ...contentFiles, "options.js"]) {
   new vm.Script(fs.readFileSync(file, "utf8"), { filename: file });
 }
 
@@ -42,7 +62,24 @@ const backgroundContext = {
   TextDecoder
 };
 vm.createContext(backgroundContext);
-vm.runInContext(fs.readFileSync("background.js", "utf8"), backgroundContext);
+for (const file of backgroundFiles) {
+  vm.runInContext(fs.readFileSync(file, "utf8"), backgroundContext, { filename: file });
+}
+const backgroundSource = backgroundFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n");
+
+const importScriptsContext = {
+  chrome: backgroundContext.chrome,
+  console,
+  URL,
+  TextDecoder
+};
+vm.createContext(importScriptsContext);
+importScriptsContext.importScripts = (...files) => {
+  for (const file of files) {
+    vm.runInContext(fs.readFileSync(file, "utf8"), importScriptsContext, { filename: file });
+  }
+};
+vm.runInContext(fs.readFileSync("background.js", "utf8"), importScriptsContext, { filename: "background.js" });
 const htmlData = backgroundContext.parseLuoguHtmlData('<script id="lentille-context" type="application/json">{"data":{"problem":{"content":{"description":"题面"}}}}</script>');
 assert.equal(htmlData.data.problem.content.description, "题面");
 const solutions = backgroundContext.extractSolutions({ data: { articles: [{ title: "题解一", content: "二分答案" }] } });
@@ -97,18 +134,44 @@ assert.equal(mergedWeekly.length, 1);
 assert.equal(mergedWeekly[0].title, "A+B");
 assert.deepEqual(backgroundContext.dedupeByKey([{ recordId: "1" }, { recordId: "1" }], backgroundContext.mistakeKey).length, 1);
 assert.deepEqual(backgroundContext.normalizeWeeklyTags(["82", "DP"], new Map([["82", "动态规划"]])), ["动态规划", "DP"]);
-assert(fs.readFileSync("background.js", "utf8").includes("getTagNameMap"));
+assert(backgroundSource.includes("getTagNameMap"));
 assert(backgroundContext.timeOrNull("1720000000") > 0);
 assert.equal(backgroundContext.extractRecordList({ currentData: { records: { result: [{ problem: { pid: "P1000" }, score: 100, status: 12, time: 1720000000 }] } } }).length, 1);
 assert.equal(backgroundContext.extractRecordList({ data: { records: { records: [{ problem: { pid: "P1001" }, score: 0, status: 6, time: 1720000000 }] } } }).length, 1);
 assert.equal(backgroundContext.normalizeRecordListItem({ problem: { pid: "P1000", title: "A+B" }, score: 100, status: 12, time: 1720000000 }).isFullScore, true);
 
-const contentSource = fs.readFileSync("content.js", "utf8");
+const contentSource = contentFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n");
+const contentContext = {
+  chrome: {
+    runtime: {
+      sendMessage() { return Promise.resolve({ ok: true }); },
+      connect() { return { onMessage: { addListener() {} }, postMessage() {}, disconnect() {} }; },
+      onMessage: { addListener() {} }
+    },
+    storage: { local: { get() { return Promise.resolve({}); }, set() { return Promise.resolve(); } } }
+  },
+  document: {
+    body: { innerText: "" },
+    documentElement: { innerHTML: "" },
+    getElementById() { return null; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; }
+  },
+  location: { href: "https://www.luogu.com.cn/discuss", pathname: "/discuss" },
+  window: { addEventListener() {}, innerWidth: 1200, innerHeight: 800, scrollX: 0, scrollY: 0 },
+  setInterval() {},
+  Date,
+  console
+};
+vm.createContext(contentContext);
+for (const file of contentFiles) {
+  vm.runInContext(fs.readFileSync(file, "utf8"), contentContext, { filename: file });
+}
 assert(contentSource.includes("scrapeWeeklyRecords"));
 assert(contentSource.includes("parseRecordListTime"));
 assert(contentSource.includes("scrapeLuoguUser"));
 assert(contentSource.includes("findUserId"));
-assert(fs.readFileSync("background.js", "utf8").includes("WEEKLY_CACHE_TTL"));
+assert(backgroundSource.includes("WEEKLY_CACHE_TTL"));
 assert(contentSource.includes("button.disabled = false;"));
 assert(contentSource.includes('button.textContent = button.matches(":hover")'));
 assert(contentSource.includes("if (state.hintLoading)"));
@@ -126,7 +189,7 @@ assert(contentSource.includes("取消全选"));
 assert(contentSource.includes("多个算法必须同时包含"));
 assert(!contentSource.includes("filterTags.indexOf(a) - filterTags.indexOf(b)"));
 assert(!contentSource.includes("已选择全部"));
-assert(fs.readFileSync("background.js", "utf8").includes("MAX_FILTER_ALL_TAGS = 8"));
+assert(backgroundSource.includes("MAX_FILTER_ALL_TAGS = 8"));
 assert(contentSource.includes("https://next.tboi.cn"));
 assert(contentSource.includes("🐂 🍺 的oj"));
 assert(contentSource.includes("findArticleEditor"));
