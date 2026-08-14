@@ -190,7 +190,7 @@ assert(contentSource.includes("多个算法必须同时包含"));
 assert(!contentSource.includes("filterTags.indexOf(a) - filterTags.indexOf(b)"));
 assert(!contentSource.includes("已选择全部"));
 assert(backgroundSource.includes("MAX_FILTER_ALL_TAGS = 8"));
-assert(contentSource.includes("https://next.tboi.cn"));
+assert(contentSource.includes("https://next.tboj.cn"));
 assert(contentSource.includes("🐂 🍺 的oj"));
 assert(contentSource.includes("findArticleEditor"));
 assert(contentSource.includes('location.pathname === "/article/_new"'));

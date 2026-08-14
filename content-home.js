@@ -20,13 +20,13 @@ function mountFriendLink() {
   const friendBox = [...document.querySelectorAll(".lg-article")]
     .find((node) => node.querySelector("h2")?.textContent.trim() === "友情链接");
   const firstGroup = friendBox && friendBox.querySelector("p");
-  if (!firstGroup || document.getElementById(FRIEND_LINK_ID) || friendBox.querySelector('a[href="https://next.tboi.cn"]')) return;
+  if (!firstGroup || document.getElementById(FRIEND_LINK_ID) || friendBox.querySelector('a[href="https://next.tboj.cn"]')) return;
   const paragraph = document.createElement("p");
   paragraph.id = FRIEND_LINK_ID;
   const heading = document.createElement("strong");
   heading.textContent = "🐂 🍺 的oj";
   const link = document.createElement("a");
-  link.href = "https://next.tboi.cn";
+  link.href = "https://next.tboj.cn";
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   link.textContent = "ZYZOJ";
